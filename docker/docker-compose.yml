@@ -1,0 +1,35 @@
+services:
+  cpp_core:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpp
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - cpp_core
+    environment:
+      - QUARKCACHE_HOST=cpp_core
+      - QUARKCACHE_PORT=9000
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    environment:
+      - BACKEND_URL=http://backend:8000
+    restart: unless-stopped
