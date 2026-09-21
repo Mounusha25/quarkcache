@@ -251,7 +251,7 @@ KEYS\r\n                  →   key1 val1 -1\r\nkey2 val2 30\r\nEND\r\n
 Test it directly with netcat — no client library needed:
 ```bash
 nc 127.0.0.1 9000
-SET session:user123 {"name":"Brijesh"} 3600
+SET session:user123 {"name":"Mounusha} 3600
 GET session:user123
 STATS
 ```
@@ -410,8 +410,8 @@ Typical throughput on a MacBook Air M2: **~50,000–80,000 ops/sec** over local 
 
 <div align="center">
 
-Built with deep systems knowledge by **Brijesh Kumar**
+Built with deep systems knowledge by **Mounusha Metti**
 
-*If you're hiring for systems, backend, or full-stack roles — [let's talk](https://github.com/Brijesh03032001)*
+*If you're hiring for systems, backend, or full-stack roles — [let's talk](https://github.com/Mounusha25)*
 
 </div>
