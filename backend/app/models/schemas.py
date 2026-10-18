@@ -61,6 +61,15 @@ class MetricsResponse(BaseModel):
     aof_fsyncs: int = 0
     aof_recovered_records: int = 0
     aof_truncated_bytes: int = 0
+    aof_compactions: int = 0
+    aof_reclaimed_bytes: int = 0
+
+
+class CompactionResponse(BaseModel):
+    before_bytes: int
+    after_bytes: int
+    reclaimed_bytes: int
+    records: int
 
 
 # --------------------------------------------------------------------------- #

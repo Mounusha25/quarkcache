@@ -28,6 +28,15 @@ struct AofStats {
     uint64_t fsyncs{0};
     uint64_t recovered_records{0};
     uint64_t truncated_bytes{0};
+    uint64_t compactions{0};
+    uint64_t reclaimed_bytes{0};
+};
+
+struct AofCompactionResult {
+    uint64_t before_bytes{0};
+    uint64_t after_bytes{0};
+    uint64_t reclaimed_bytes{0};
+    uint64_t records{0};
 };
 
 /**
@@ -52,6 +61,7 @@ public:
         std::optional<std::chrono::system_clock::time_point> expires_at
     );
     void append_delete(const std::string& key);
+    AofCompactionResult compact(const std::vector<AofRecord>& live_records);
 
     const std::vector<AofRecord>& recovered_records() const { return recovered_records_; }
     AofStats stats() const;

@@ -228,6 +228,44 @@ void test_everysec_policy_syncs_without_another_write() {
     expect(aof.stats().fsyncs >= 1, "everysec worker should sync an idle dirty log");
 }
 
+void test_aof_compaction_preserves_only_live_state() {
+    TemporaryAof file;
+    uint64_t before_bytes = 0;
+    {
+        auto aof = std::make_shared<AppendOnlyFile>(file.path, FsyncPolicy::Always);
+        KVStore store(10, aof);
+        store.restore();
+        for (int version = 0; version < 20; ++version) {
+            store.set("hot", std::string(256, static_cast<char>('a' + version % 26)));
+        }
+        store.set("ttl", "survives", std::chrono::seconds(60));
+        store.set("deleted", "gone");
+        store.del("deleted");
+        before_bytes = store.get_stats().aof_size_bytes;
+
+        const auto result = store.compact_persistence();
+        expect(result.before_bytes == before_bytes, "compaction should report original size");
+        expect(result.after_bytes < result.before_bytes, "compaction should shrink stale history");
+        expect(result.reclaimed_bytes == result.before_bytes - result.after_bytes,
+               "reclaimed bytes should match the size reduction");
+        expect(result.records == 2, "only two live keys should remain in the AOF");
+        const auto stats = store.get_stats();
+        expect(stats.aof_compactions == 1, "compaction should be counted");
+        expect(stats.aof_reclaimed_bytes == result.reclaimed_bytes,
+               "reclaimed bytes should be observable");
+    }
+    {
+        auto aof = std::make_shared<AppendOnlyFile>(file.path, FsyncPolicy::No);
+        KVStore recovered(10, aof);
+        recovered.restore();
+        expect(recovered.get("hot").has_value(), "latest overwritten value should recover");
+        expect(recovered.get("ttl") == "survives", "live TTL value should recover");
+        expect(!recovered.get("deleted"), "deleted key must not reappear after compaction");
+        expect(recovered.get_stats().aof_recovered_records == 2,
+               "compacted file should contain one record per live key");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -244,6 +282,7 @@ int main() {
         {"AOF checksum", test_aof_rejects_checksum_corruption},
         {"fsync policy", test_fsync_policy_validation},
         {"everysec background sync", test_everysec_policy_syncs_without_another_write},
+        {"AOF compaction", test_aof_compaction_preserves_only_live_state},
     };
 
     int failures = 0;

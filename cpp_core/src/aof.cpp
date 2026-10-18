@@ -94,6 +94,16 @@ std::vector<uint8_t> encode(const AofRecord& record) {
     return payload;
 }
 
+std::vector<uint8_t> encode_frame(const AofRecord& record) {
+    const auto payload = encode(record);
+    std::vector<uint8_t> frame;
+    frame.reserve(8 + payload.size());
+    append_u32(frame, static_cast<uint32_t>(payload.size()));
+    frame.insert(frame.end(), payload.begin(), payload.end());
+    append_u32(frame, crc32(payload.data(), payload.size()));
+    return frame;
+}
+
 AofRecord decode(const std::vector<uint8_t>& payload) {
     if (payload.empty()) throw std::runtime_error("empty AOF record");
     size_t offset = 0;
@@ -226,12 +236,7 @@ void AppendOnlyFile::append_delete(const std::string& key) {
 }
 
 void AppendOnlyFile::append(const AofRecord& record) {
-    const auto payload = encode(record);
-    std::vector<uint8_t> frame;
-    frame.reserve(8 + payload.size());
-    append_u32(frame, static_cast<uint32_t>(payload.size()));
-    frame.insert(frame.end(), payload.begin(), payload.end());
-    append_u32(frame, crc32(payload.data(), payload.size()));
+    const auto frame = encode_frame(record);
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (background_errno_ != 0) {
@@ -243,6 +248,87 @@ void AppendOnlyFile::append(const AofRecord& record) {
     stats_.size_bytes += frame.size();
     ++stats_.writes;
     sync_if_needed();
+}
+
+AofCompactionResult AppendOnlyFile::compact(const std::vector<AofRecord>& live_records) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (background_errno_ != 0) {
+        throw std::system_error(
+            background_errno_, std::generic_category(), "background AOF fsync failed"
+        );
+    }
+
+    const auto temporary_path = std::filesystem::path(
+        path_.string() + ".rewrite." + std::to_string(::getpid())
+    );
+    const int temporary_fd = ::open(
+        temporary_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0644
+    );
+    if (temporary_fd < 0) {
+        throw std::system_error(errno, std::generic_category(), "could not create compacted AOF");
+    }
+
+    uint64_t compacted_size = kHeader.size();
+    bool installed = false;
+    try {
+        write_all(
+            temporary_fd,
+            reinterpret_cast<const uint8_t*>(kHeader.data()),
+            kHeader.size()
+        );
+        for (const auto& record : live_records) {
+            const auto frame = encode_frame(record);
+            write_all(temporary_fd, frame.data(), frame.size());
+            compacted_size += frame.size();
+        }
+        if (::fsync(temporary_fd) != 0) {
+            throw std::system_error(errno, std::generic_category(), "compacted AOF fsync failed");
+        }
+        std::filesystem::rename(temporary_path, path_);
+
+        const uint64_t previous_size = stats_.size_bytes;
+        const int previous_fd = fd_;
+        fd_ = temporary_fd;
+        installed = true;
+        ::close(previous_fd);
+        dirty_ = false;
+        stats_.size_bytes = compacted_size;
+        ++stats_.compactions;
+        const uint64_t reclaimed = previous_size > compacted_size
+            ? previous_size - compacted_size
+            : 0;
+        stats_.reclaimed_bytes += reclaimed;
+
+        const auto parent = path_.has_parent_path() ? path_.parent_path() : std::filesystem::path(".");
+        const int directory_fd = ::open(parent.c_str(), O_RDONLY);
+        if (directory_fd < 0) {
+            background_errno_ = errno;
+            throw std::system_error(errno, std::generic_category(), "could not open AOF directory");
+        }
+        const int directory_sync_result = ::fsync(directory_fd);
+        const int directory_sync_errno = errno;
+        ::close(directory_fd);
+        if (directory_sync_result != 0) {
+            background_errno_ = directory_sync_errno;
+            throw std::system_error(
+                directory_sync_errno, std::generic_category(), "AOF directory fsync failed"
+            );
+        }
+
+        return AofCompactionResult{
+            previous_size,
+            compacted_size,
+            reclaimed,
+            static_cast<uint64_t>(live_records.size()),
+        };
+    } catch (...) {
+        if (!installed) {
+            ::close(temporary_fd);
+            std::error_code cleanup_error;
+            std::filesystem::remove(temporary_path, cleanup_error);
+        }
+        throw;
+    }
 }
 
 void AppendOnlyFile::sync_if_needed() {

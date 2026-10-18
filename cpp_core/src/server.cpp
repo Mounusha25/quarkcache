@@ -337,8 +337,29 @@ std::string TcpServer::process_command(const std::string& line, int /*client_fd*
             << ",\"aof_fsyncs\":"        << s.aof_fsyncs
             << ",\"aof_recovered_records\":" << s.aof_recovered_records
             << ",\"aof_truncated_bytes\":" << s.aof_truncated_bytes
+            << ",\"aof_compactions\":"     << s.aof_compactions
+            << ",\"aof_reclaimed_bytes\":" << s.aof_reclaimed_bytes
             << "}\r\n";
         return oss.str();
+
+    } else if (cmd == "COMPACT") {
+        if (tokens.size() != 1) return "ERROR COMPACT takes no arguments\r\n";
+        try {
+            const auto result = store_->compact_persistence();
+            std::ostringstream oss;
+            oss << "COMPACT {"
+                << "\"before_bytes\":"   << result.before_bytes
+                << ",\"after_bytes\":"    << result.after_bytes
+                << ",\"reclaimed_bytes\":" << result.reclaimed_bytes
+                << ",\"records\":"        << result.records
+                << "}\r\n";
+            return oss.str();
+        } catch (const std::logic_error&) {
+            return "ERROR AOF persistence is disabled\r\n";
+        } catch (const std::exception& error) {
+            std::cerr << "[QuarkCache] AOF compaction failed: " << error.what() << "\n";
+            return "ERROR AOF compaction failed\r\n";
+        }
 
     } else if (cmd == "KEYS") {
         std::ostringstream oss;

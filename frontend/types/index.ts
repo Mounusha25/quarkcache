@@ -9,6 +9,21 @@ export interface MetricsResponse {
   memory_used_bytes: number;
   memory_limit_bytes: number;
   active_connections: number;
+  aof_enabled: boolean;
+  aof_size_bytes: number;
+  aof_writes: number;
+  aof_fsyncs: number;
+  aof_recovered_records: number;
+  aof_truncated_bytes: number;
+  aof_compactions: number;
+  aof_reclaimed_bytes: number;
+}
+
+export interface CompactionResponse {
+  before_bytes: number;
+  after_bytes: number;
+  reclaimed_bytes: number;
+  records: number;
 }
 
 // ─── Keys ────────────────────────────────────────────────────────────────────

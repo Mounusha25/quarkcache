@@ -116,6 +116,23 @@ def main() -> int:
                 assert exchange(connection, "SET ttl-key alive 30") == "OK\r\n"
                 assert exchange(connection, "SET removed value") == "OK\r\n"
                 assert exchange(connection, "DEL removed") == "OK\r\n"
+                for version in range(20):
+                    assert exchange(connection, f"SET churn value-{version}") == "OK\r\n"
+                assert exchange(connection, "DEL churn") == "OK\r\n"
+
+                before_line = exchange(connection, "STATS")
+                before = json.loads(before_line.removeprefix("STATS ").strip())
+                compact_line = exchange(connection, "COMPACT")
+                compact = json.loads(compact_line.removeprefix("COMPACT ").strip())
+                assert compact["before_bytes"] == before["aof_size_bytes"]
+                assert compact["after_bytes"] < compact["before_bytes"]
+                assert compact["reclaimed_bytes"] > 0
+                assert compact["records"] == 3
+
+                after_line = exchange(connection, "STATS")
+                after = json.loads(after_line.removeprefix("STATS ").strip())
+                assert after["aof_compactions"] == 1
+                assert after["aof_reclaimed_bytes"] == compact["reclaimed_bytes"]
         finally:
             stop(process, crash=True)
 
@@ -130,7 +147,7 @@ def main() -> int:
                 assert exchange(connection, "GET expiring") == "NOT_FOUND\r\n"
                 stats_line = exchange(connection, "STATS")
                 stats = json.loads(stats_line.removeprefix("STATS ").strip())
-                assert stats["aof_recovered_records"] >= 8
+                assert stats["aof_recovered_records"] == 3
                 assert stats["aof_truncated_bytes"] == 0
         finally:
             stop(recovered)

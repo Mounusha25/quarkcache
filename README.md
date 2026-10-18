@@ -246,6 +246,7 @@ SET mykey hello 60\r\n    →   OK\r\n
 GET mykey\r\n             →   VALUE hello\r\n
 DEL mykey\r\n             →   OK\r\n  (or NOT_FOUND\r\n)
 STATS\r\n                 →   STATS {"hits":42,"misses":8,...}\r\n
+COMPACT\r\n               →   COMPACT {"before_bytes":4096,"after_bytes":512,...}\r\n
 KEYS\r\n                  →   key1 val1 -1\r\nkey2 val2 30\r\nEND\r\n
 ```
 
@@ -282,7 +283,7 @@ quark-cache/
 │   ├── requirements.txt
 │   └── app/
 │       ├── main.py
-│       ├── routers/             # /health  /keys  /metrics  /benchmarks  /ai
+│       ├── routers/             # /health /keys /metrics /benchmarks /maintenance /ai
 │       ├── services/            # cache_client · metrics · benchmark · ai
 │       └── models/schemas.py    # Pydantic request/response models
 │
@@ -338,9 +339,10 @@ ctest --test-dir build --output-on-failure
 ```
 
 The suite tests LRU ordering, capacity eviction, TTL expiry, byte accounting,
-metrics, concurrent access, fragmented TCP input, protocol errors, key listing,
-and a real server lifecycle. GitHub Actions runs it on Linux and macOS; Linux
-also enables AddressSanitizer and UndefinedBehaviorSanitizer.
+metrics, concurrent access, AOF recovery and compaction, fragmented TCP input,
+protocol errors, key listing, hard-kill restart recovery, and a real server
+lifecycle. GitHub Actions runs it on Linux and macOS; Linux also enables
+AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ### Enable durable persistence
 
@@ -364,8 +366,25 @@ The binary AOF uses a versioned header, length-framed records, absolute TTL
 deadlines, and CRC32 checksums. Startup replays complete records in order.
 An incomplete final record from a killed process is truncated safely; checksum
 or structural corruption fails startup instead of silently returning incorrect
-data. `STATS` reports AOF bytes, writes, fsyncs, recovered records, and repaired
-tail bytes.
+data. `STATS` reports AOF bytes, writes, fsyncs, recovered records, repaired tail
+bytes, compaction count, and total reclaimed bytes.
+
+Compact stale SET/DEL history into one record per live key without stopping the
+server:
+
+```bash
+# TCP protocol
+printf 'COMPACT\r\n' | nc 127.0.0.1 9000
+
+# Or through FastAPI/OpenAPI
+curl -X POST http://127.0.0.1:8000/maintenance/compact
+```
+
+Compaction writes a checksummed temporary file, calls `fsync`, atomically
+renames it over the existing AOF, and syncs the containing directory. Mutations
+are briefly serialized while the live keyspace is snapshotted and replaced.
+Absolute TTL deadlines are preserved, deleted and expired keys are omitted, and
+the server continues appending through the already-open replacement descriptor.
 
 Docker Compose enables `everysec` persistence by default with the named volume
 `quarkcache-data`. Direct local runs remain memory-only unless
@@ -428,6 +447,7 @@ All three services start together. The C++ server uses `epoll` — on macOS/Wind
 | LRU evict | O(1) | Always evicts `list::back()` |
 | TTL sweep | O(n) | Background thread, every 5s |
 | STATS | O(1) | Atomic reads, no lock |
+| COMPACT | O(n) | Atomic AOF rewrite of the live keyspace |
 
 Run the black-box benchmark instead of relying on an unrepeatable throughput claim:
 
@@ -463,7 +483,7 @@ for regression detection, not a Redis comparison or production capacity claim.
 
 | Feature | Complexity | Description |
 |---|---|---|
-| AOF compaction | Medium | Rewrite the log to contain only current live keys |
+| Background AOF rewrite | Medium | Move large compactions off the command thread |
 | Pub/Sub | Medium | Subscribe fds to channels; fan-out on PUBLISH |
 | Pipelining | Low | Batch multiple commands in one TCP round-trip |
 | Consistent Hashing | High | Distribute keyspace across multiple server instances |

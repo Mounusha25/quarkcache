@@ -6,6 +6,7 @@ Protocol (line-delimited, \r\n terminated):
     GET <key>\r\n                  →  VALUE <val> | NOT_FOUND | ERROR ...
     DEL <key>\r\n                  →  OK | NOT_FOUND | ERROR ...
     STATS\r\n                      →  STATS <json>
+    COMPACT\r\n                    →  COMPACT <json>
     KEYS\r\n                       →  <key> <value> <ttl|-1>\r\n ... END\r\n
 """
 
@@ -29,11 +30,11 @@ class CacheClientError(Exception):
     """Raised when the cache server returns an error or is unreachable."""
 
 
-async def _send_command(command: str) -> str:
+async def _send_command(command: str, *, timeout: float = _TIMEOUT) -> str:
     """Open a TCP connection, send one command, and return the full response."""
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(_HOST, _PORT), timeout=_TIMEOUT
+            asyncio.open_connection(_HOST, _PORT), timeout=timeout
         )
     except (ConnectionRefusedError, OSError) as exc:
         raise CacheClientError(f"Cannot connect to cache server: {exc}") from exc
@@ -49,14 +50,14 @@ async def _send_command(command: str) -> str:
         if command.strip().upper().startswith("KEYS"):
             lines: list[str] = []
             while True:
-                line = await asyncio.wait_for(reader.readline(), timeout=_TIMEOUT)
+                line = await asyncio.wait_for(reader.readline(), timeout=timeout)
                 decoded = line.decode().rstrip("\r\n")
                 if decoded == "END":
                     break
                 lines.append(decoded)
             return "\n".join(lines)
         else:
-            line = await asyncio.wait_for(reader.readline(), timeout=_TIMEOUT)
+            line = await asyncio.wait_for(reader.readline(), timeout=timeout)
             return line.decode().rstrip("\r\n")
     except asyncio.TimeoutError as exc:
         raise CacheClientError("Cache server response timed out") from exc
@@ -108,6 +109,18 @@ async def get_stats() -> dict:
         return json.loads(payload)
     except json.JSONDecodeError as exc:
         raise CacheClientError(f"Could not parse STATS JSON: {exc}") from exc
+
+
+async def compact_aof() -> dict:
+    """Atomically rewrite the AOF with only the current live keyspace."""
+    response = await _send_command("COMPACT", timeout=60.0)
+    if not response.startswith("COMPACT "):
+        raise CacheClientError(f"COMPACT failed: {response}")
+    payload = response[len("COMPACT "):]
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise CacheClientError(f"Could not parse COMPACT JSON: {exc}") from exc
 
 
 async def list_keys() -> list[dict]:

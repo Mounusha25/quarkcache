@@ -60,4 +60,6 @@ async def get_metrics() -> MetricsResponse:
         aof_fsyncs=raw.get("aof_fsyncs", 0),
         aof_recovered_records=raw.get("aof_recovered_records", 0),
         aof_truncated_bytes=raw.get("aof_truncated_bytes", 0),
+        aof_compactions=raw.get("aof_compactions", 0),
+        aof_reclaimed_bytes=raw.get("aof_reclaimed_bytes", 0),
     )

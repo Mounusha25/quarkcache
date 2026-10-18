@@ -8,7 +8,7 @@ Run with:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import health, keys, metrics, benchmarks, ai
+from app.routers import health, keys, metrics, benchmarks, ai, maintenance
 
 app = FastAPI(
     title="QuarkCache API",
@@ -35,6 +35,7 @@ app.include_router(keys.router)
 app.include_router(metrics.router)
 app.include_router(benchmarks.router)
 app.include_router(ai.router)
+app.include_router(maintenance.router)
 
 
 @app.get("/", include_in_schema=False)

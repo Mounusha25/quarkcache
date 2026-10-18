@@ -1,5 +1,7 @@
 #pragma once
 
+#include "quarkcache/aof.hpp"
+
 #include <string>
 #include <optional>
 #include <chrono>
@@ -10,7 +12,6 @@
 namespace quarkcache {
 
 class LruCache;
-class AppendOnlyFile;
 
 struct Stats {
     uint64_t total_requests{0};
@@ -24,6 +25,8 @@ struct Stats {
     uint64_t aof_fsyncs{0};
     uint64_t aof_recovered_records{0};
     uint64_t aof_truncated_bytes{0};
+    uint64_t aof_compactions{0};
+    uint64_t aof_reclaimed_bytes{0};
 };
 
 /**
@@ -50,6 +53,9 @@ public:
 
     // Restore mutations without recording them again or affecting request metrics.
     void restore();
+
+    // Atomically replace the AOF with one SET record per currently live key.
+    AofCompactionResult compact_persistence();
 
     // Prune TTL-expired keys; call from a background thread periodically.
     void evict_expired();

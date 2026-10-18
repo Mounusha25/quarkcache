@@ -2,6 +2,9 @@
 #include "quarkcache/aof.hpp"
 #include "quarkcache/lru_cache.hpp"
 
+#include <stdexcept>
+#include <vector>
+
 namespace quarkcache {
 
 KVStore::KVStore(size_t max_keys, std::shared_ptr<AppendOnlyFile> persistence)
@@ -65,6 +68,36 @@ void KVStore::restore() {
     }
 }
 
+AofCompactionResult KVStore::compact_persistence() {
+    if (!persistence_) throw std::logic_error("AOF persistence is disabled");
+
+    std::lock_guard<std::mutex> lock(mu_);
+    lru_->evict_expired();
+    const auto steady_now = std::chrono::steady_clock::now();
+    const auto system_now = std::chrono::system_clock::now();
+    std::vector<AofRecord> live_records;
+    const auto entries = lru_->all_entries();
+    live_records.reserve(entries.size());
+
+    for (const auto& [key, entry] : entries) {
+        std::optional<std::chrono::system_clock::time_point> expires_at;
+        if (entry.expires_at) {
+            const auto remaining = *entry.expires_at - steady_now;
+            if (remaining <= std::chrono::steady_clock::duration::zero()) continue;
+            expires_at = system_now + std::chrono::duration_cast<
+                std::chrono::system_clock::duration
+            >(remaining);
+        }
+        live_records.push_back(AofRecord{
+            AofOperation::Set,
+            key,
+            entry.value,
+            expires_at,
+        });
+    }
+    return persistence_->compact(live_records);
+}
+
 void KVStore::evict_expired() {
     std::lock_guard<std::mutex> lock(mu_);
     lru_->evict_expired();
@@ -86,6 +119,8 @@ Stats KVStore::get_stats() const {
         s.aof_fsyncs = aof.fsyncs;
         s.aof_recovered_records = aof.recovered_records;
         s.aof_truncated_bytes = aof.truncated_bytes;
+        s.aof_compactions = aof.compactions;
+        s.aof_reclaimed_bytes = aof.reclaimed_bytes;
     }
     return s;
 }
