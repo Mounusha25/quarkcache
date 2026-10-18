@@ -1,3 +1,4 @@
+#include "quarkcache/aof.hpp"
 #include "quarkcache/kv_store.hpp"
 #include "quarkcache/lru_cache.hpp"
 
@@ -5,6 +6,8 @@
 #include <chrono>
 #include <exception>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -16,6 +19,21 @@ namespace {
 using namespace std::chrono_literals;
 using quarkcache::KVStore;
 using quarkcache::LruCache;
+using quarkcache::AppendOnlyFile;
+using quarkcache::FsyncPolicy;
+
+class TemporaryAof {
+public:
+    TemporaryAof() {
+        static std::atomic<uint64_t> counter{0};
+        path = std::filesystem::temp_directory_path() /
+            ("quarkcache-test-" + std::to_string(++counter) + ".aof");
+        std::filesystem::remove(path);
+    }
+    ~TemporaryAof() { std::filesystem::remove(path); }
+
+    std::filesystem::path path;
+};
 
 void expect(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -119,6 +137,97 @@ void test_concurrent_store_access() {
     expect(stats.misses == 0, "concurrent round trips should not miss");
 }
 
+void test_aof_round_trip_and_store_recovery() {
+    TemporaryAof file;
+    {
+        auto aof = std::make_shared<AppendOnlyFile>(file.path, FsyncPolicy::Always);
+        KVStore store(10, aof);
+        store.restore();
+        store.set("durable", "value");
+        store.set("ttl", "temporary", std::chrono::seconds(60));
+        store.set("deleted", "gone");
+        store.del("deleted");
+        expect(store.get_stats().aof_writes == 4, "mutations should be appended");
+    }
+    {
+        auto aof = std::make_shared<AppendOnlyFile>(file.path, FsyncPolicy::No);
+        KVStore recovered(10, aof);
+        recovered.restore();
+
+        expect(recovered.get("durable") == "value", "durable key should recover");
+        expect(recovered.get("ttl") == "temporary", "unexpired TTL key should recover");
+        expect(!recovered.get("deleted"), "deleted key should stay deleted");
+        const auto stats = recovered.get_stats();
+        expect(stats.aof_enabled, "AOF should be reported as enabled");
+        expect(stats.aof_recovered_records == 4, "all complete records should replay");
+    }
+}
+
+void test_aof_discards_incomplete_tail() {
+    TemporaryAof file;
+    {
+        AppendOnlyFile aof(file.path, FsyncPolicy::Always);
+        aof.append_set("safe", "value", std::nullopt);
+    }
+    {
+        std::ofstream output(file.path, std::ios::binary | std::ios::app);
+        output.write("bad", 3);
+    }
+    AppendOnlyFile recovered(file.path, FsyncPolicy::No);
+    expect(recovered.recovered_records().size() == 1, "complete record should survive");
+    expect(recovered.stats().truncated_bytes == 3, "partial tail should be reported");
+}
+
+void test_aof_rejects_checksum_corruption() {
+    TemporaryAof file;
+    {
+        AppendOnlyFile aof(file.path, FsyncPolicy::Always);
+        aof.append_set("key", "value", std::nullopt);
+    }
+    {
+        std::fstream output(file.path, std::ios::binary | std::ios::in | std::ios::out);
+        output.seekp(11);  // header (7) + frame length (4) = first payload byte
+        const char corrupted = static_cast<char>(0x7f);
+        output.write(&corrupted, 1);
+    }
+    bool threw = false;
+    try {
+        AppendOnlyFile corrupted(file.path, FsyncPolicy::No);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    expect(threw, "checksum corruption must fail startup");
+}
+
+void test_fsync_policy_validation() {
+    expect(
+        quarkcache::parse_fsync_policy("always") == FsyncPolicy::Always,
+        "always policy should parse"
+    );
+    expect(
+        quarkcache::parse_fsync_policy("everysec") == FsyncPolicy::EverySecond,
+        "everysec policy should parse"
+    );
+    bool threw = false;
+    try {
+        (void)quarkcache::parse_fsync_policy("sometimes");
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    expect(threw, "unknown fsync policy should be rejected");
+}
+
+void test_everysec_policy_syncs_without_another_write() {
+    TemporaryAof file;
+    AppendOnlyFile aof(file.path, FsyncPolicy::EverySecond);
+    aof.append_set("key", "value", std::nullopt);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (aof.stats().fsyncs == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    expect(aof.stats().fsyncs >= 1, "everysec worker should sync an idle dirty log");
+}
+
 }  // namespace
 
 int main() {
@@ -130,6 +239,11 @@ int main() {
         {"snapshot expiration", test_snapshot_excludes_expired_entries},
         {"store metrics", test_store_metrics},
         {"concurrent access", test_concurrent_store_access},
+        {"AOF round trip", test_aof_round_trip_and_store_recovery},
+        {"AOF truncated tail", test_aof_discards_incomplete_tail},
+        {"AOF checksum", test_aof_rejects_checksum_corruption},
+        {"fsync policy", test_fsync_policy_validation},
+        {"everysec background sync", test_everysec_policy_syncs_without_another_write},
     };
 
     int failures = 0;

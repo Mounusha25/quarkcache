@@ -331,6 +331,12 @@ std::string TcpServer::process_command(const std::string& line, int /*client_fd*
             << ",\"misses\":"           << s.misses
             << ",\"bytes_used\":"       << s.bytes_used
             << ",\"active_connections\":" << s.active_connections
+            << ",\"aof_enabled\":"       << (s.aof_enabled ? "true" : "false")
+            << ",\"aof_size_bytes\":"    << s.aof_size_bytes
+            << ",\"aof_writes\":"        << s.aof_writes
+            << ",\"aof_fsyncs\":"        << s.aof_fsyncs
+            << ",\"aof_recovered_records\":" << s.aof_recovered_records
+            << ",\"aof_truncated_bytes\":" << s.aof_truncated_bytes
             << "}\r\n";
         return oss.str();
 

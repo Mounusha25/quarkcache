@@ -10,6 +10,7 @@
 namespace quarkcache {
 
 class LruCache;
+class AppendOnlyFile;
 
 struct Stats {
     uint64_t total_requests{0};
@@ -17,6 +18,12 @@ struct Stats {
     uint64_t misses{0};
     uint64_t bytes_used{0};
     uint32_t active_connections{0};
+    bool aof_enabled{false};
+    uint64_t aof_size_bytes{0};
+    uint64_t aof_writes{0};
+    uint64_t aof_fsyncs{0};
+    uint64_t aof_recovered_records{0};
+    uint64_t aof_truncated_bytes{0};
 };
 
 /**
@@ -27,7 +34,10 @@ struct Stats {
  */
 class KVStore {
 public:
-    explicit KVStore(size_t max_keys = 100'000);
+    explicit KVStore(
+        size_t max_keys = 100'000,
+        std::shared_ptr<AppendOnlyFile> persistence = nullptr
+    );
     ~KVStore();
 
     bool set(const std::string& key,
@@ -37,6 +47,9 @@ public:
     std::optional<std::string> get(const std::string& key);
 
     bool del(const std::string& key);
+
+    // Restore mutations without recording them again or affecting request metrics.
+    void restore();
 
     // Prune TTL-expired keys; call from a background thread periodically.
     void evict_expired();
@@ -52,6 +65,7 @@ public:
 
 private:
     std::unique_ptr<LruCache> lru_;
+    std::shared_ptr<AppendOnlyFile> persistence_;
     mutable std::mutex mu_;
 
     std::atomic<uint64_t> total_requests_{0};

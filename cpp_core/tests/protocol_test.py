@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -44,51 +45,95 @@ def exchange(connection: socket.socket, command: str, *, terminator: bytes = b"\
     return response.decode()
 
 
-def main() -> int:
-    binary = Path(sys.argv[1]).resolve()
-    port = available_port()
+def launch(binary: Path, port: int, aof_path: Path) -> subprocess.Popen[str]:
     environment = os.environ.copy()
-    environment.update({"QUARKCACHE_BIND_HOST": "127.0.0.1", "QUARKCACHE_PORT": str(port)})
-    process = subprocess.Popen(
+    environment.update(
+        {
+            "QUARKCACHE_BIND_HOST": "127.0.0.1",
+            "QUARKCACHE_PORT": str(port),
+            "QUARKCACHE_AOF_PATH": str(aof_path),
+            "QUARKCACHE_FSYNC": "always",
+        }
+    )
+    return subprocess.Popen(
         [str(binary)],
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
+
+
+def stop(process: subprocess.Popen[str], *, crash: bool = False) -> None:
+    if process.poll() is not None:
+        return
+    if crash:
+        process.kill()
+    else:
+        process.send_signal(signal.SIGTERM)
     try:
-        wait_until_ready(process, port)
-        with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
-            assert exchange(connection, "SET greeting hello") == "OK\r\n"
-            assert exchange(connection, "GET greeting") == "VALUE hello\r\n"
-            assert exchange(connection, "DEL greeting") == "OK\r\n"
-            assert exchange(connection, "GET greeting") == "NOT_FOUND\r\n"
-            assert exchange(connection, "SET") == "ERROR SET <key> <value> [<ttl>]\r\n"
-            assert exchange(connection, "SET key value invalid") == "ERROR invalid TTL\r\n"
-            assert exchange(connection, "NOPE") == "ERROR unknown command 'NOPE'\r\n"
-            stats_line = exchange(connection, "STATS")
-            stats = json.loads(stats_line.removeprefix("STATS ").strip())
-            assert stats["total_requests"] == 4
-            assert stats["hits"] == 1
-            assert stats["misses"] == 1
-            assert stats["active_connections"] == 1
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
 
-            assert exchange(connection, "SET expiring value 0") == "OK\r\n"
-            assert exchange(connection, "GET expiring") == "NOT_FOUND\r\n"
 
-            connection.sendall(b"SET partial")
-            time.sleep(0.02)
-            connection.sendall(b" value\r\n")
-            assert connection.recv(4096) == b"OK\r\n"
-            assert exchange(connection, "KEYS", terminator=b"END\r\n").endswith("END\r\n")
-    finally:
-        if process.poll() is None:
-            process.send_signal(signal.SIGTERM)
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+def main() -> int:
+    binary = Path(sys.argv[1]).resolve()
+    with tempfile.TemporaryDirectory(prefix="quarkcache-protocol-") as directory:
+        aof_path = Path(directory) / "appendonly.aof"
+        port = available_port()
+        process = launch(binary, port, aof_path)
+        try:
+            wait_until_ready(process, port)
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as connection:
+                assert exchange(connection, "SET greeting hello") == "OK\r\n"
+                assert exchange(connection, "GET greeting") == "VALUE hello\r\n"
+                assert exchange(connection, "DEL greeting") == "OK\r\n"
+                assert exchange(connection, "GET greeting") == "NOT_FOUND\r\n"
+                assert exchange(connection, "SET") == "ERROR SET <key> <value> [<ttl>]\r\n"
+                assert exchange(connection, "SET key value invalid") == "ERROR invalid TTL\r\n"
+                assert exchange(connection, "NOPE") == "ERROR unknown command 'NOPE'\r\n"
+                stats_line = exchange(connection, "STATS")
+                stats = json.loads(stats_line.removeprefix("STATS ").strip())
+                assert stats["total_requests"] == 4
+                assert stats["hits"] == 1
+                assert stats["misses"] == 1
+                assert stats["active_connections"] == 1
+                assert stats["aof_enabled"] is True
+
+                assert exchange(connection, "SET expiring value 0") == "OK\r\n"
+                assert exchange(connection, "GET expiring") == "NOT_FOUND\r\n"
+
+                connection.sendall(b"SET partial")
+                time.sleep(0.02)
+                connection.sendall(b" value\r\n")
+                assert connection.recv(4096) == b"OK\r\n"
+                assert exchange(connection, "KEYS", terminator=b"END\r\n").endswith(
+                    "END\r\n"
+                )
+                assert exchange(connection, "SET durable recovered") == "OK\r\n"
+                assert exchange(connection, "SET ttl-key alive 30") == "OK\r\n"
+                assert exchange(connection, "SET removed value") == "OK\r\n"
+                assert exchange(connection, "DEL removed") == "OK\r\n"
+        finally:
+            stop(process, crash=True)
+
+        recovery_port = available_port()
+        recovered = launch(binary, recovery_port, aof_path)
+        try:
+            wait_until_ready(recovered, recovery_port)
+            with socket.create_connection(("127.0.0.1", recovery_port), timeout=2) as connection:
+                assert exchange(connection, "GET durable") == "VALUE recovered\r\n"
+                assert exchange(connection, "GET ttl-key") == "VALUE alive\r\n"
+                assert exchange(connection, "GET removed") == "NOT_FOUND\r\n"
+                assert exchange(connection, "GET expiring") == "NOT_FOUND\r\n"
+                stats_line = exchange(connection, "STATS")
+                stats = json.loads(stats_line.removeprefix("STATS ").strip())
+                assert stats["aof_recovered_records"] >= 8
+                assert stats["aof_truncated_bytes"] == 0
+        finally:
+            stop(recovered)
 
     print("protocol integration tests passed")
     return 0

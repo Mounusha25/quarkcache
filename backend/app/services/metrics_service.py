@@ -54,4 +54,10 @@ async def get_metrics() -> MetricsResponse:
         memory_used_bytes=bytes_,
         memory_limit_bytes=_MEMORY_LIMIT_BYTES,
         active_connections=conns,
+        aof_enabled=raw.get("aof_enabled", False),
+        aof_size_bytes=raw.get("aof_size_bytes", 0),
+        aof_writes=raw.get("aof_writes", 0),
+        aof_fsyncs=raw.get("aof_fsyncs", 0),
+        aof_recovered_records=raw.get("aof_recovered_records", 0),
+        aof_truncated_bytes=raw.get("aof_truncated_bytes", 0),
     )

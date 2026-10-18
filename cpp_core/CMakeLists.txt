@@ -27,6 +27,7 @@ endif()
 #  Library: quarkcache_core
 # --------------------------------------------------------------------------- #
 add_library(quarkcache_core STATIC
+    src/aof.cpp
     src/lru_cache.cpp
     src/kv_store.cpp
     src/server.cpp

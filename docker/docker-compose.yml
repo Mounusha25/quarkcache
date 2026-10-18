@@ -5,6 +5,11 @@ services:
       dockerfile: docker/Dockerfile.cpp
     ports:
       - "9000:9000"
+    environment:
+      - QUARKCACHE_AOF_PATH=/data/appendonly.aof
+      - QUARKCACHE_FSYNC=everysec
+    volumes:
+      - quarkcache-data:/data
     restart: unless-stopped
 
   backend:
@@ -33,3 +38,6 @@ services:
     environment:
       - BACKEND_URL=http://backend:8000
     restart: unless-stopped
+
+volumes:
+  quarkcache-data:

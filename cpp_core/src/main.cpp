@@ -1,4 +1,5 @@
 #include "quarkcache/kv_store.hpp"
+#include "quarkcache/aof.hpp"
 #include "quarkcache/server.hpp"
 
 #include <iostream>
@@ -21,8 +22,22 @@ int main() {
     std::signal(SIGINT,  handle_signal);
     std::signal(SIGTERM, handle_signal);
 
+    std::shared_ptr<quarkcache::AppendOnlyFile> persistence;
+    const char* aof_path = std::getenv("QUARKCACHE_AOF_PATH");
+    if (aof_path && *aof_path) {
+        const char* policy_env = std::getenv("QUARKCACHE_FSYNC");
+        const auto policy = quarkcache::parse_fsync_policy(policy_env ? policy_env : "everysec");
+        persistence = std::make_shared<quarkcache::AppendOnlyFile>(aof_path, policy);
+    }
+
     // Shared store with up to 100 000 keys.
-    auto store = std::make_shared<quarkcache::KVStore>(100'000);
+    auto store = std::make_shared<quarkcache::KVStore>(100'000, persistence);
+    store->restore();
+    if (persistence) {
+        const auto stats = persistence->stats();
+        std::cout << "[QuarkCache] AOF enabled at " << persistence->path()
+                  << "; recovered " << stats.recovered_records << " records\n";
+    }
 
     // Background thread: prune TTL-expired keys every 5 seconds.
     std::thread expiry_thread([&store]() {

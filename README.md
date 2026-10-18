@@ -266,10 +266,12 @@ quark-cache/
 ├── cpp_core/                    # C++17 cache engine
 │   ├── CMakeLists.txt
 │   ├── include/quarkcache/
+│   │   ├── aof.hpp              # AOF records, policies, and metrics
 │   │   ├── kv_store.hpp         # Thread-safe public API
 │   │   ├── lru_cache.hpp        # LRU eviction + TTL
 │   │   └── server.hpp           # epoll/kqueue TCP server
 │   ├── src/
+│   │   ├── aof.cpp              # Checksummed persistence + recovery
 │   │   ├── lru_cache.cpp        # O(1) linked-list + hash-map impl
 │   │   ├── kv_store.cpp         # Mutex + atomic metrics wrapper
 │   │   ├── server.cpp           # Non-blocking event loop
@@ -339,6 +341,35 @@ The suite tests LRU ordering, capacity eviction, TTL expiry, byte accounting,
 metrics, concurrent access, fragmented TCP input, protocol errors, key listing,
 and a real server lifecycle. GitHub Actions runs it on Linux and macOS; Linux
 also enables AddressSanitizer and UndefinedBehaviorSanitizer.
+
+### Enable durable persistence
+
+Persistence is opt-in for direct local runs:
+
+```bash
+QUARKCACHE_AOF_PATH=./data/appendonly.aof \
+QUARKCACHE_FSYNC=everysec \
+./build/quarkcache_server
+```
+
+`QUARKCACHE_FSYNC` supports three explicit durability/performance policies:
+
+| Policy | Behavior | Trade-off |
+|---|---|---|
+| `always` | `fsync` after every mutation | Strongest durability, highest write latency |
+| `everysec` | Background `fsync` of dirty data every second | At most roughly one second of writes at risk |
+| `no` | Leave flushing to the operating system | Highest throughput, weakest crash guarantee |
+
+The binary AOF uses a versioned header, length-framed records, absolute TTL
+deadlines, and CRC32 checksums. Startup replays complete records in order.
+An incomplete final record from a killed process is truncated safely; checksum
+or structural corruption fails startup instead of silently returning incorrect
+data. `STATS` reports AOF bytes, writes, fsyncs, recovered records, and repaired
+tail bytes.
+
+Docker Compose enables `everysec` persistence by default with the named volume
+`quarkcache-data`. Direct local runs remain memory-only unless
+`QUARKCACHE_AOF_PATH` is set.
 
 ### 2 — Start the FastAPI backend
 
@@ -432,7 +463,7 @@ for regression detection, not a Redis comparison or production capacity claim.
 
 | Feature | Complexity | Description |
 |---|---|---|
-| AOF Persistence | Medium | Append every write to a log file; replay on restart |
+| AOF compaction | Medium | Rewrite the log to contain only current live keys |
 | Pub/Sub | Medium | Subscribe fds to channels; fan-out on PUBLISH |
 | Pipelining | Low | Batch multiple commands in one TCP round-trip |
 | Consistent Hashing | High | Distribute keyspace across multiple server instances |

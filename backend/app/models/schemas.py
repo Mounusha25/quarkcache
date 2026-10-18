@@ -55,6 +55,12 @@ class MetricsResponse(BaseModel):
     memory_used_bytes: int
     memory_limit_bytes: int
     active_connections: int
+    aof_enabled: bool = False
+    aof_size_bytes: int = 0
+    aof_writes: int = 0
+    aof_fsyncs: int = 0
+    aof_recovered_records: int = 0
+    aof_truncated_bytes: int = 0
 
 
 # --------------------------------------------------------------------------- #
