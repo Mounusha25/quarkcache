@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY cpp_core/ .
 
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && \
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF && \
     cmake --build build --parallel "$(nproc)"
 
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green?style=flat-square&logo=fastapi)](https://fastapi.tiangolo.com)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)](https://nextjs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
+[![CI](https://github.com/Mounusha25/quarkcache/actions/workflows/ci.yml/badge.svg)](https://github.com/Mounusha25/quarkcache/actions/workflows/ci.yml)
 
 *Production-grade architecture · O(1) LRU eviction · epoll/kqueue event loop · Real-time dashboard · AI insights*
 
@@ -251,7 +252,7 @@ KEYS\r\n                  →   key1 val1 -1\r\nkey2 val2 30\r\nEND\r\n
 Test it directly with netcat — no client library needed:
 ```bash
 nc 127.0.0.1 9000
-SET session:user123 {"name":"Mounusha} 3600
+SET session:user123 {"name":"Mounusha"} 3600
 GET session:user123
 STATS
 ```
@@ -268,11 +269,12 @@ quark-cache/
 │   │   ├── kv_store.hpp         # Thread-safe public API
 │   │   ├── lru_cache.hpp        # LRU eviction + TTL
 │   │   └── server.hpp           # epoll/kqueue TCP server
-│   └── src/
-│       ├── lru_cache.cpp        # O(1) linked-list + hash-map impl
-│       ├── kv_store.cpp         # Mutex + atomic metrics wrapper
-│       ├── server.cpp           # Non-blocking event loop
-│       └── main.cpp             # Entry point + background threads
+│   ├── src/
+│   │   ├── lru_cache.cpp        # O(1) linked-list + hash-map impl
+│   │   ├── kv_store.cpp         # Mutex + atomic metrics wrapper
+│   │   ├── server.cpp           # Non-blocking event loop
+│   │   └── main.cpp             # Entry point + background threads
+│   └── tests/                    # Core unit + black-box protocol tests
 │
 ├── backend/                     # Python 3.12 FastAPI layer
 │   ├── requirements.txt
@@ -301,6 +303,9 @@ quark-cache/
     ├── Dockerfile.backend
     ├── Dockerfile.frontend
     └── docker-compose.yml
+
+benchmarks/tcp_benchmark.py       # Concurrent P50/P95/P99 benchmark
+.github/workflows/ci.yml          # Linux/macOS tests, sanitizers, Docker builds
 ```
 
 ---
@@ -318,6 +323,22 @@ cmake --build build --parallel
 ```
 
 > Requires: `cmake ≥ 3.16`, `g++ ≥ 11` (C++17). Works on Linux (epoll) and macOS (kqueue).
+
+### Verify the core
+
+```bash
+cmake -S cpp_core -B build \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTING=ON \
+  -DQUARKCACHE_ENABLE_SANITIZERS=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+The suite tests LRU ordering, capacity eviction, TTL expiry, byte accounting,
+metrics, concurrent access, fragmented TCP input, protocol errors, key listing,
+and a real server lifecycle. GitHub Actions runs it on Linux and macOS; Linux
+also enables AddressSanitizer and UndefinedBehaviorSanitizer.
 
 ### 2 — Start the FastAPI backend
 
@@ -377,7 +398,33 @@ All three services start together. The C++ server uses `epoll` — on macOS/Wind
 | TTL sweep | O(n) | Background thread, every 5s |
 | STATS | O(1) | Atomic reads, no lock |
 
-Typical throughput on a MacBook Air M2: **~50,000–80,000 ops/sec** over local TCP with the Python asyncio client.
+Run the black-box benchmark instead of relying on an unrepeatable throughput claim:
+
+```bash
+cmake -S cpp_core -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+python3 benchmarks/tcp_benchmark.py \
+  --server-binary build/quarkcache_server \
+  --clients 8 \
+  --operations 5000 \
+  --value-size 64 \
+  --output benchmarks/results/local.json
+```
+
+It launches an isolated server, verifies every response, and reports completed
+operations, duration, throughput, and mean/P50/P95/P99/max latency. Hardware,
+operating system, client count, operation count, and value size should accompany
+any published performance number.
+
+Reference run on 2026-10-17 (Apple M4 MacBook Air, macOS arm64, Release build,
+8 clients × 2,000 alternating SET/GET operations, 64-byte values):
+
+| Completed | Throughput | P50 | P95 | P99 |
+|---:|---:|---:|---:|---:|
+| 16,000 ops | 47,630 ops/s | 0.151 ms | 0.327 ms | 0.427 ms |
+
+This measures the Python client and local TCP server together. It is a reference
+for regression detection, not a Redis comparison or production capacity claim.
 
 ---
 
@@ -410,8 +457,8 @@ Typical throughput on a MacBook Air M2: **~50,000–80,000 ops/sec** over local 
 
 <div align="center">
 
-Built with deep systems knowledge by **Mounusha Metti**
+Built by **Mounusha Ram Metti**
 
-*If you're hiring for systems, backend, or full-stack roles — [let's talk](https://github.com/Mounusha25)*
+*Systems, backend, and full-stack engineering portfolio project.*
 
 </div>
