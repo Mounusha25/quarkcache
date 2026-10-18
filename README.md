@@ -20,7 +20,7 @@
 
 ## What is QuarkCache?
 
-QuarkCache is a **full-stack, production-grade in-memory key-value store** — think Redis, built from the ground up. It demonstrates deep systems programming knowledge across three layers:
+QuarkCache is a **full-stack, portfolio-scale in-memory key-value store** — think Redis, built from the ground up. It demonstrates systems programming across three layers:
 
 - **C++17 engine** — custom LRU cache, per-key TTL, durable AOF, and a pipelined non-blocking TCP server using `epoll` (Linux) / `kqueue` (macOS)
 - **FastAPI backend** — async Python bridge exposing REST + benchmark APIs
@@ -81,7 +81,7 @@ void LruCache::touch(std::unordered_map<std::string, MapValue>::iterator it) {
 }
 ```
 
-Why not `std::map`? It gives O(log n) lookup. We use `unordered_map` for O(1) average. Why not a vector? Inserting/removing from the middle is O(n). The linked list + hash map combo is the **only** data structure that achieves O(1) for all three operations simultaneously.
+Why not `std::map`? It gives O(log n) lookup. We use `unordered_map` for O(1) average. Why not a vector? Inserting/removing from the middle is O(n). A linked list plus hash map is the standard design for O(1)-average lookup, promotion, and eviction.
 
 ---
 
@@ -219,7 +219,7 @@ class KVStore {
 ```
 
 **Why `std::atomic` for counters instead of the mutex?**  
-Counters are updated on every single request. Locking a mutex for a counter increment would cause contention between the event-loop thread and the background stats thread. `std::atomic` uses CPU hardware instructions (`LOCK XADD` on x86) — no OS involvement, no context switch.
+Counters are updated on every request. Keeping them atomic allows independent reads and updates without acquiring the cache mutex; the exact machine instructions are platform- and compiler-dependent.
 
 **Why `std::unique_ptr` for `LruCache`?**  
 RAII — the destructor automatically frees the cache when `KVStore` goes out of scope. No `delete`, no leaks. This is idiomatic modern C++.
@@ -242,7 +242,11 @@ The server destructor handles cleanup explicitly:
 ```cpp
 TcpServer::~TcpServer() {
     stop();
-    for (const auto& client : clients_) close(client.first);
+    for (const auto& [fd, state] : clients_) {
+        (void)state;
+        close(fd);
+        store_->decrement_connections();
+    }
     clients_.clear();
     if (listen_fd_ != -1) { close(listen_fd_); listen_fd_ = -1; }
     if (epoll_fd_  != -1) { close(epoll_fd_);  epoll_fd_  = -1; }
@@ -344,7 +348,7 @@ cd cpp_core
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ./build/quarkcache_server
-# [QuarkCache] Listening on 127.0.0.1:9000
+# [QuarkCache] Listening on 0.0.0.0:9000
 ```
 
 > Requires: `cmake ≥ 3.16`, `g++ ≥ 11` (C++17). Works on Linux (epoll) and macOS (kqueue).
@@ -441,7 +445,7 @@ Terminal 3 │ npm run dev                                  (port 3000)
 
 ### Optional — AI-enhanced insights
 
-Set your OpenAI key to unlock GPT-4o-powered cache analysis in the AI Insights page:
+Set your OpenAI key to unlock GPT-4o-mini-powered cache analysis in the AI Insights page:
 ```bash
 export OPENAI_API_KEY=sk-...
 uvicorn app.main:app --reload --port 8000
