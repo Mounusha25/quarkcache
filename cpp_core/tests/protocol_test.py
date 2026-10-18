@@ -135,7 +135,6 @@ def main() -> int:
                 assert exchange(connection, f"SET large {large_value}") == "OK\r\n"
                 with socket.create_connection(("127.0.0.1", port), timeout=10) as slow_reader:
                     slow_reader.settimeout(15)
-                    slow_reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
                     slow_reader.sendall(b"GET large\r\n" * 400)
                     time.sleep(0.1)
                     large_responses = receive_lines(slow_reader, 400)

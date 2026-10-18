@@ -252,7 +252,10 @@ void TcpServer::handle_read(int event_fd, int client_fd) {
                 return;
             }
             if (!process_buffered_commands(event_fd, client_fd)) return;
-            if (clients_.at(client_fd).read_paused) break;
+            if (clients_.at(client_fd).read_paused) {
+                clients_.at(client_fd).kernel_read_deferred = true;
+                break;
+            }
         } else if (n == 0) {
             std::cout << "[QuarkCache] Client disconnected: fd=" << client_fd << "\n";
             close_client(event_fd, client_fd);
@@ -265,7 +268,6 @@ void TcpServer::handle_read(int event_fd, int client_fd) {
             return;
         }
     }
-    if (has_client(client_fd)) handle_write(event_fd, client_fd);
 }
 
 bool TcpServer::process_buffered_commands(int event_fd, int client_fd) {
@@ -343,7 +345,10 @@ void TcpServer::handle_write(int event_fd, int client_fd) {
             it = clients_.find(client_fd);
             if (it == clients_.end()) return;
             if (it->second.output.empty()) {
+                const bool drain_deferred_read = it->second.kernel_read_deferred;
+                it->second.kernel_read_deferred = false;
                 update_interest(event_fd, client_fd);
+                if (drain_deferred_read) handle_read(event_fd, client_fd);
                 return;
             }
             continue;

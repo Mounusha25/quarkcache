@@ -191,6 +191,7 @@ struct ClientState {
     std::string output;
     size_t output_offset;
     bool read_paused;
+    bool kernel_read_deferred;
 };
 ```
 

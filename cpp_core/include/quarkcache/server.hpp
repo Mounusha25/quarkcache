@@ -51,6 +51,7 @@ private:
         std::string output;
         size_t output_offset{0};
         bool read_paused{false};
+        bool kernel_read_deferred{false};
         bool close_after_write{false};
     };
 
