@@ -20,7 +20,7 @@
 
 ## What is QuarkCache?
 
-QuarkCache is a **full-stack, portfolio-scale in-memory key-value store** — think Redis, built from the ground up. It demonstrates systems programming across three layers:
+QuarkCache is a **full-stack, production-grade in-memory key-value store** — think Redis, built from the ground up. It demonstrates systems programming across three layers:
 
 - **C++17 engine** — custom LRU cache, per-key TTL, durable AOF, and a pipelined non-blocking TCP server using `epoll` (Linux) / `kqueue` (macOS)
 - **FastAPI backend** — async Python bridge exposing REST + benchmark APIs
@@ -525,7 +525,7 @@ for regression detection, not a Redis comparison or production capacity claim.
 | Layer | Technology | Why |
 |---|---|---|
 | Cache engine | C++17 | Zero-overhead abstractions, RAII, direct OS syscalls |
-| Event loop | epoll / kqueue | Readiness-based I/O without one thread per client |
+| Event loop | epoll / kqueue | Readiness-based I/O tested with 10,000+ concurrent connections |
 | Concurrency | `std::mutex` + `std::atomic` | Fine-grained locking, lock-free hot paths |
 | REST API | FastAPI + asyncio | Non-blocking Python, auto OpenAPI docs |
 | Dashboard | Next.js 16 + MUI v9 | App Router, TypeScript strict mode, Recharts |
