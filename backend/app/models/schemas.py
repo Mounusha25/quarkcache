@@ -63,6 +63,11 @@ class MetricsResponse(BaseModel):
     aof_truncated_bytes: int = 0
     aof_compactions: int = 0
     aof_reclaimed_bytes: int = 0
+    network_commands_processed: int = 0
+    network_pipelined_commands: int = 0
+    network_partial_writes: int = 0
+    network_backpressure_events: int = 0
+    network_pending_output_bytes: int = 0
 
 
 class CompactionResponse(BaseModel):

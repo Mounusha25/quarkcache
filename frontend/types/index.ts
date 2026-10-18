@@ -17,6 +17,11 @@ export interface MetricsResponse {
   aof_truncated_bytes: number;
   aof_compactions: number;
   aof_reclaimed_bytes: number;
+  network_commands_processed: number;
+  network_pipelined_commands: number;
+  network_partial_writes: number;
+  network_backpressure_events: number;
+  network_pending_output_bytes: number;
 }
 
 export interface CompactionResponse {

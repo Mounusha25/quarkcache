@@ -16,5 +16,8 @@ frontend/.env*.local
 # ─── Generated benchmark reports ─────────────────────────────────────────────
 benchmarks/results/
 
+# ─── Local persistence ───────────────────────────────────────────────────────
+/data/
+
 # ─── macOS ────────────────────────────────────────────────────────────────────
 .DS_Store

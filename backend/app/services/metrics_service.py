@@ -62,4 +62,9 @@ async def get_metrics() -> MetricsResponse:
         aof_truncated_bytes=raw.get("aof_truncated_bytes", 0),
         aof_compactions=raw.get("aof_compactions", 0),
         aof_reclaimed_bytes=raw.get("aof_reclaimed_bytes", 0),
+        network_commands_processed=raw.get("network_commands_processed", 0),
+        network_pipelined_commands=raw.get("network_pipelined_commands", 0),
+        network_partial_writes=raw.get("network_partial_writes", 0),
+        network_backpressure_events=raw.get("network_backpressure_events", 0),
+        network_pending_output_bytes=raw.get("network_pending_output_bytes", 0),
     )

@@ -45,6 +45,19 @@ def exchange(connection: socket.socket, command: str, *, terminator: bytes = b"\
     return response.decode()
 
 
+def receive_lines(connection: socket.socket, expected: int) -> list[bytes]:
+    """Receive exactly *expected* CRLF-delimited responses from a pipeline."""
+    response = bytearray()
+    while response.count(b"\r\n") < expected:
+        chunk = connection.recv(64 * 1024)
+        if not chunk:
+            raise ConnectionError("server closed before all pipeline responses arrived")
+        response.extend(chunk)
+    lines = bytes(response).split(b"\r\n")
+    assert lines[-1] == b""
+    return lines[:-1]
+
+
 def launch(binary: Path, port: int, aof_path: Path) -> subprocess.Popen[str]:
     environment = os.environ.copy()
     environment.update(
@@ -101,6 +114,45 @@ def main() -> int:
                 assert stats["misses"] == 1
                 assert stats["active_connections"] == 1
                 assert stats["aof_enabled"] is True
+
+                pipeline = (
+                    b"SET pipeline one\r\n"
+                    b"GET pipeline\r\n"
+                    b"SET pipeline two\r\n"
+                    b"GET pipeline\r\n"
+                    b"DEL pipeline\r\n"
+                )
+                connection.sendall(pipeline)
+                assert receive_lines(connection, 5) == [
+                    b"OK",
+                    b"VALUE one",
+                    b"OK",
+                    b"VALUE two",
+                    b"OK",
+                ]
+
+                large_value = "x" * (16 * 1024)
+                assert exchange(connection, f"SET large {large_value}") == "OK\r\n"
+                with socket.create_connection(("127.0.0.1", port), timeout=10) as slow_reader:
+                    slow_reader.settimeout(15)
+                    slow_reader.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                    slow_reader.sendall(b"GET large\r\n" * 400)
+                    time.sleep(0.1)
+                    large_responses = receive_lines(slow_reader, 400)
+                    assert all(line == b"VALUE " + large_value.encode() for line in large_responses)
+
+                network_line = exchange(connection, "STATS")
+                network = json.loads(network_line.removeprefix("STATS ").strip())
+                assert network["network_pipelined_commands"] >= 5
+                assert network["network_partial_writes"] > 0
+                assert network["network_backpressure_events"] > 0
+                assert network["network_pending_output_bytes"] == 0
+                assert exchange(connection, "DEL large") == "OK\r\n"
+
+                with socket.create_connection(("127.0.0.1", port), timeout=5) as oversized:
+                    oversized.settimeout(5)
+                    oversized.sendall(b"GET " + b"k" * (1024 * 1024 + 4096))
+                    assert oversized.recv(4096) == b"ERROR input buffer limit exceeded\r\n"
 
                 assert exchange(connection, "SET expiring value 0") == "OK\r\n"
                 assert exchange(connection, "GET expiring") == "NOT_FOUND\r\n"

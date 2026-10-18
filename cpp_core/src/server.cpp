@@ -39,6 +39,10 @@ namespace quarkcache {
 
 namespace {
 
+constexpr size_t kMaxInputBufferBytes = 1U * 1024U * 1024U;
+constexpr size_t kOutputHighWaterBytes = 64U * 1024U;
+constexpr size_t kMaxOutputBufferBytes = 1U * 1024U * 1024U;
+
 void set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags == -1) throw std::runtime_error("fcntl F_GETFL failed");
@@ -69,6 +73,12 @@ TcpServer::TcpServer(std::shared_ptr<KVStore> store,
 
 TcpServer::~TcpServer() {
     stop();
+    for (const auto& [fd, state] : clients_) {
+        (void)state;
+        close(fd);
+        store_->decrement_connections();
+    }
+    clients_.clear();
     if (listen_fd_ != -1) { close(listen_fd_); listen_fd_ = -1; }
     if (epoll_fd_  != -1) { close(epoll_fd_);  epoll_fd_  = -1; }
 }
@@ -148,8 +158,13 @@ void TcpServer::event_loop() {
             int fd = events[i].data.fd;
             if (fd == listen_fd_) {
                 accept_client(epoll_fd_);
-            } else if (events[i].events & (EPOLLIN | EPOLLHUP | EPOLLERR)) {
-                handle_read(epoll_fd_, fd);
+            } else if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+                close_client(epoll_fd_, fd);
+            } else {
+                if (events[i].events & EPOLLIN) handle_read(epoll_fd_, fd);
+                if (has_client(fd) && (events[i].events & EPOLLOUT)) {
+                    handle_write(epoll_fd_, fd);
+                }
             }
         }
     }
@@ -169,12 +184,15 @@ void TcpServer::event_loop() {
             int fd = static_cast<int>(events[i].ident);
             if (events[i].flags & EV_ERROR) {
                 std::cerr << "[QuarkCache] EV_ERROR on fd=" << fd << "\n";
+                if (fd != listen_fd_) close_client(epoll_fd_, fd);
                 continue;
             }
             if (fd == listen_fd_) {
                 accept_client(epoll_fd_);
-            } else {
+            } else if (events[i].filter == EVFILT_READ) {
                 handle_read(epoll_fd_, fd);
+            } else if (has_client(fd) && events[i].filter == EVFILT_WRITE) {
+                handle_write(epoll_fd_, fd);
             }
         }
     }
@@ -200,96 +218,220 @@ void TcpServer::accept_client(int event_fd) {
 
 #if USE_EPOLL
         epoll_event ev{};
-        ev.events  = EPOLLIN | EPOLLET;
+        ev.events  = EPOLLIN | EPOLLRDHUP | EPOLLET;
         ev.data.fd = cfd;
         epoll_ctl(event_fd, EPOLL_CTL_ADD, cfd, &ev);
 
 #elif USE_KQUEUE
-        struct kevent kev{};
-        EV_SET(&kev, cfd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-        kevent(event_fd, &kev, 1, nullptr, 0, nullptr);
+        struct kevent changes[2]{};
+        EV_SET(&changes[0], cfd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
+        EV_SET(&changes[1], cfd, EVFILT_WRITE, EV_ADD | EV_DISABLE, 0, 0, nullptr);
+        kevent(event_fd, changes, 2, nullptr, 0, nullptr);
 #endif
 
-        {
-            std::lock_guard<std::mutex> lock(buffers_mu_);
-            read_buffers_[cfd] = "";
-        }
+        clients_.emplace(cfd, ClientState{});
         std::cout << "[QuarkCache] Client connected: fd=" << cfd << "\n";
     }
 }
 
 void TcpServer::handle_read(int event_fd, int client_fd) {
     char buf[4096];
-    std::string accumulated;
 
     while (true) {
         ssize_t n = read(client_fd, buf, sizeof(buf));
         if (n > 0) {
-            accumulated.append(buf, static_cast<size_t>(n));
-        } else if (n == 0) {
-            // Clean disconnect.
-            std::cout << "[QuarkCache] Client disconnected: fd=" << client_fd << "\n";
-
-#if USE_EPOLL
-            epoll_ctl(event_fd, EPOLL_CTL_DEL, client_fd, nullptr);
-#elif USE_KQUEUE
-            struct kevent kev{};
-            EV_SET(&kev, client_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-            kevent(event_fd, &kev, 1, nullptr, 0, nullptr);
-#endif
-            close(client_fd);
-            store_->decrement_connections();
-            {
-                std::lock_guard<std::mutex> lock(buffers_mu_);
-                read_buffers_.erase(client_fd);
+            auto it = clients_.find(client_fd);
+            if (it == clients_.end()) return;
+            it->second.input.append(buf, static_cast<size_t>(n));
+            if (it->second.input.size() > kMaxInputBufferBytes) {
+                it->second.input.clear();
+                it->second.read_paused = true;
+                it->second.close_after_write = true;
+                queue_response(event_fd, client_fd, "ERROR input buffer limit exceeded\r\n");
+                handle_write(event_fd, client_fd);
+                return;
             }
+            if (!process_buffered_commands(event_fd, client_fd)) return;
+            if (clients_.at(client_fd).read_paused) break;
+        } else if (n == 0) {
+            std::cout << "[QuarkCache] Client disconnected: fd=" << client_fd << "\n";
+            close_client(event_fd, client_fd);
             return;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             std::cerr << "[QuarkCache] read error fd=" << client_fd
                       << ": " << strerror(errno) << "\n";
-#if USE_EPOLL
-            epoll_ctl(event_fd, EPOLL_CTL_DEL, client_fd, nullptr);
-#elif USE_KQUEUE
-            struct kevent kev{};
-            EV_SET(&kev, client_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-            kevent(event_fd, &kev, 1, nullptr, 0, nullptr);
-#endif
-            close(client_fd);
-            store_->decrement_connections();
-            {
-                std::lock_guard<std::mutex> lock(buffers_mu_);
-                read_buffers_.erase(client_fd);
-            }
+            close_client(event_fd, client_fd);
             return;
         }
     }
+    if (has_client(client_fd)) handle_write(event_fd, client_fd);
+}
 
-    if (accumulated.empty()) return;
+bool TcpServer::process_buffered_commands(int event_fd, int client_fd) {
+    auto it = clients_.find(client_fd);
+    if (it == clients_.end()) return false;
 
-    std::string* client_buf;
-    {
-        std::lock_guard<std::mutex> lock(buffers_mu_);
-        client_buf = &read_buffers_[client_fd];
-        *client_buf += accumulated;
-    }
-
-    // Process all complete \n-terminated lines from the buffer.
-    std::lock_guard<std::mutex> lock(buffers_mu_);
-    std::string& buf_ref = read_buffers_[client_fd];
-    size_t pos;
-    while ((pos = buf_ref.find('\n')) != std::string::npos) {
-        std::string line = buf_ref.substr(0, pos);
+    size_t consumed = 0;
+    uint64_t batch_commands = 0;
+    while (!it->second.read_paused) {
+        const size_t newline = it->second.input.find('\n', consumed);
+        if (newline == std::string::npos) break;
+        std::string line = it->second.input.substr(consumed, newline - consumed);
+        consumed = newline + 1;
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        buf_ref.erase(0, pos + 1);
         if (line.empty()) continue;
 
-        std::string response = process_command(line, client_fd);
-        if (!response.empty()) {
-            ssize_t written = write(client_fd, response.data(), response.size());
-            (void)written; // best-effort; production code would buffer partial writes
+        ++batch_commands;
+        ++commands_processed_;
+        if (!queue_response(event_fd, client_fd, process_command(line, client_fd))) {
+            return false;
         }
+        it = clients_.find(client_fd);
+        if (it == clients_.end()) return false;
     }
+
+    if (consumed > 0) it->second.input.erase(0, consumed);
+    if (batch_commands > 1) pipelined_commands_ += batch_commands;
+    update_interest(event_fd, client_fd);
+    return true;
+}
+
+bool TcpServer::queue_response(int event_fd, int client_fd, std::string response) {
+    auto it = clients_.find(client_fd);
+    if (it == clients_.end()) return false;
+    auto& state = it->second;
+    const size_t pending = state.output.size() - state.output_offset;
+
+    if (pending + response.size() > kMaxOutputBufferBytes) {
+        static const std::string limit_error = "ERROR output buffer limit exceeded\r\n";
+        if (pending + limit_error.size() > kMaxOutputBufferBytes) {
+            close_client(event_fd, client_fd);
+            return false;
+        }
+        response = limit_error;
+        state.close_after_write = true;
+    }
+
+    state.output.append(response);
+    pending_output_bytes_ += response.size();
+    const size_t updated_pending = state.output.size() - state.output_offset;
+    if (updated_pending >= kOutputHighWaterBytes && !state.read_paused) {
+        state.read_paused = true;
+        ++backpressure_events_;
+    }
+    update_interest(event_fd, client_fd);
+    return true;
+}
+
+void TcpServer::handle_write(int event_fd, int client_fd) {
+    while (true) {
+        auto it = clients_.find(client_fd);
+        if (it == clients_.end()) return;
+        auto& state = it->second;
+
+        if (state.output_offset == state.output.size()) {
+            state.output.clear();
+            state.output_offset = 0;
+            if (state.close_after_write) {
+                close_client(event_fd, client_fd);
+                return;
+            }
+
+            state.read_paused = false;
+            if (!process_buffered_commands(event_fd, client_fd)) return;
+            it = clients_.find(client_fd);
+            if (it == clients_.end()) return;
+            if (it->second.output.empty()) {
+                update_interest(event_fd, client_fd);
+                return;
+            }
+            continue;
+        }
+
+        const size_t remaining = state.output.size() - state.output_offset;
+#ifdef MSG_NOSIGNAL
+        const ssize_t written = send(
+            client_fd, state.output.data() + state.output_offset, remaining, MSG_NOSIGNAL
+        );
+#else
+        const ssize_t written = write(
+            client_fd, state.output.data() + state.output_offset, remaining
+        );
+#endif
+        if (written > 0) {
+            const auto count = static_cast<size_t>(written);
+            state.output_offset += count;
+            pending_output_bytes_ -= count;
+            if (count < remaining) ++partial_writes_;
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            ++partial_writes_;
+            update_interest(event_fd, client_fd);
+            return;
+        }
+        close_client(event_fd, client_fd);
+        return;
+    }
+}
+
+void TcpServer::update_interest(int event_fd, int client_fd) {
+    const auto it = clients_.find(client_fd);
+    if (it == clients_.end()) return;
+    const auto& state = it->second;
+    const bool wants_read = !state.read_paused && !state.close_after_write;
+    const bool wants_write = state.output_offset < state.output.size();
+
+#if USE_EPOLL
+    epoll_event event{};
+    event.events = EPOLLRDHUP | EPOLLET;
+    if (wants_read) event.events |= EPOLLIN;
+    if (wants_write) event.events |= EPOLLOUT;
+    event.data.fd = client_fd;
+    if (epoll_ctl(event_fd, EPOLL_CTL_MOD, client_fd, &event) == -1 && errno != ENOENT) {
+        std::cerr << "[QuarkCache] epoll_ctl MOD fd=" << client_fd
+                  << ": " << strerror(errno) << "\n";
+    }
+#elif USE_KQUEUE
+    struct kevent changes[2]{};
+    EV_SET(
+        &changes[0], client_fd, EVFILT_READ,
+        EV_ADD | (wants_read ? EV_ENABLE : EV_DISABLE), 0, 0, nullptr
+    );
+    EV_SET(
+        &changes[1], client_fd, EVFILT_WRITE,
+        EV_ADD | (wants_write ? EV_ENABLE : EV_DISABLE), 0, 0, nullptr
+    );
+    if (kevent(event_fd, changes, 2, nullptr, 0, nullptr) == -1 && errno != ENOENT) {
+        std::cerr << "[QuarkCache] kevent update fd=" << client_fd
+                  << ": " << strerror(errno) << "\n";
+    }
+#endif
+}
+
+void TcpServer::close_client(int event_fd, int client_fd) {
+    const auto it = clients_.find(client_fd);
+    if (it == clients_.end()) return;
+    const size_t pending = it->second.output.size() - it->second.output_offset;
+    pending_output_bytes_ -= pending;
+
+#if USE_EPOLL
+    epoll_ctl(event_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+#elif USE_KQUEUE
+    struct kevent changes[2]{};
+    EV_SET(&changes[0], client_fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+    EV_SET(&changes[1], client_fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+    kevent(event_fd, changes, 2, nullptr, 0, nullptr);
+#endif
+    close(client_fd);
+    clients_.erase(it);
+    store_->decrement_connections();
+}
+
+bool TcpServer::has_client(int client_fd) const {
+    return clients_.find(client_fd) != clients_.end();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +481,11 @@ std::string TcpServer::process_command(const std::string& line, int /*client_fd*
             << ",\"aof_truncated_bytes\":" << s.aof_truncated_bytes
             << ",\"aof_compactions\":"     << s.aof_compactions
             << ",\"aof_reclaimed_bytes\":" << s.aof_reclaimed_bytes
+            << ",\"network_commands_processed\":" << commands_processed_.load()
+            << ",\"network_pipelined_commands\":" << pipelined_commands_.load()
+            << ",\"network_partial_writes\":" << partial_writes_.load()
+            << ",\"network_backpressure_events\":" << backpressure_events_.load()
+            << ",\"network_pending_output_bytes\":" << pending_output_bytes_.load()
             << "}\r\n";
         return oss.str();
 

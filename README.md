@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 [![CI](https://github.com/Mounusha25/quarkcache/actions/workflows/ci.yml/badge.svg)](https://github.com/Mounusha25/quarkcache/actions/workflows/ci.yml)
 
-*Production-grade architecture · O(1) LRU eviction · epoll/kqueue event loop · Real-time dashboard · AI insights*
+*O(1) LRU · durable AOF · pipelined epoll/kqueue networking · real-time dashboard · AI insights*
 
 </div>
 
@@ -22,7 +22,7 @@
 
 QuarkCache is a **full-stack, production-grade in-memory key-value store** — think Redis, built from the ground up. It demonstrates deep systems programming knowledge across three layers:
 
-- **C++17 engine** — custom LRU cache, per-key TTL, non-blocking TCP server using `epoll` (Linux) / `kqueue` (macOS)
+- **C++17 engine** — custom LRU cache, per-key TTL, durable AOF, and a pipelined non-blocking TCP server using `epoll` (Linux) / `kqueue` (macOS)
 - **FastAPI backend** — async Python bridge exposing REST + benchmark APIs
 - **Next.js 16 + MUI dashboard** — real-time metrics, key explorer, REPL, AI insights
 
@@ -33,7 +33,7 @@ QuarkCache is a **full-stack, production-grade in-memory key-value store** — t
       ▼
  FastAPI (port 8000)
       │
-      │  TCP text protocol  (SET / GET / DEL / STATS / KEYS)
+      │  TCP text protocol  (SET / GET / DEL / STATS / KEYS / COMPACT)
       ▼
  ┌──────────────────────────────────────────┐
  │        C++ QuarkCache Server (9000)       │
@@ -179,12 +179,25 @@ void TcpServer::handle_read(int event_fd, int client_fd) {
 ```
 The same event-loop logic runs on both platforms — `epoll_wait` on Linux, `kevent` on macOS — without runtime overhead.
 
-**Per-client read buffers:**  
-TCP is a stream protocol — a single `read()` call may return a partial command or multiple commands concatenated. Each client gets a dedicated `std::string` buffer; complete `\n`-terminated lines are extracted and dispatched:
+**Per-client input/output state:**
+TCP is a stream protocol — a single `read()` may return a partial command or
+many pipelined commands, while a non-blocking `send()` may write only part of a
+response. Each connection therefore keeps independent input, output, and write
+offset state:
 
 ```cpp
-std::unordered_map<int, std::string> read_buffers_; // fd → partial data
+struct ClientState {
+    std::string input;
+    std::string output;
+    size_t output_offset;
+    bool read_paused;
+};
 ```
+
+Responses remain ordered across a pipeline. When queued output reaches 64 KiB,
+read interest is disabled and the event loop drains `EPOLLOUT`/`EVFILT_WRITE`
+before accepting more commands. Per-client input and output hard limits prevent
+a slow or malicious client from growing server memory without bound.
 
 ---
 
@@ -228,6 +241,8 @@ The server destructor handles cleanup explicitly:
 ```cpp
 TcpServer::~TcpServer() {
     stop();
+    for (const auto& client : clients_) close(client.first);
+    clients_.clear();
     if (listen_fd_ != -1) { close(listen_fd_); listen_fd_ = -1; }
     if (epoll_fd_  != -1) { close(epoll_fd_);  epoll_fd_  = -1; }
 }
@@ -256,6 +271,12 @@ nc 127.0.0.1 9000
 SET session:user123 {"name":"Mounusha"} 3600
 GET session:user123
 STATS
+```
+
+Commands may be pipelined in one write; responses are returned in the same order:
+
+```bash
+printf 'SET a one\r\nGET a\r\nDEL a\r\n' | nc 127.0.0.1 9000
 ```
 
 ---
@@ -340,9 +361,10 @@ ctest --test-dir build --output-on-failure
 
 The suite tests LRU ordering, capacity eviction, TTL expiry, byte accounting,
 metrics, concurrent access, AOF recovery and compaction, fragmented TCP input,
-protocol errors, key listing, hard-kill restart recovery, and a real server
-lifecycle. GitHub Actions runs it on Linux and macOS; Linux also enables
-AddressSanitizer and UndefinedBehaviorSanitizer.
+ordered pipelines, multi-megabyte slow-reader backpressure, buffer limits,
+protocol errors, hard-kill restart recovery, and a real server lifecycle.
+GitHub Actions runs it on Linux and macOS; Linux also enables AddressSanitizer
+and UndefinedBehaviorSanitizer.
 
 ### Enable durable persistence
 
@@ -448,6 +470,7 @@ All three services start together. The C++ server uses `epoll` — on macOS/Wind
 | TTL sweep | O(n) | Background thread, every 5s |
 | STATS | O(1) | Atomic reads, no lock |
 | COMPACT | O(n) | Atomic AOF rewrite of the live keyspace |
+| Pipeline | O(k) | Ordered processing for k buffered commands |
 
 Run the black-box benchmark instead of relying on an unrepeatable throughput claim:
 
@@ -485,7 +508,7 @@ for regression detection, not a Redis comparison or production capacity claim.
 |---|---|---|
 | Background AOF rewrite | Medium | Move large compactions off the command thread |
 | Pub/Sub | Medium | Subscribe fds to channels; fan-out on PUBLISH |
-| Pipelining | Low | Batch multiple commands in one TCP round-trip |
+| Event-loop sharding | High | Distribute connections across multiple I/O threads |
 | Consistent Hashing | High | Distribute keyspace across multiple server instances |
 | Replication | High | Primary → replica streaming of write commands |
 | TLS | Medium | Wrap accept socket with OpenSSL for encrypted transport |
