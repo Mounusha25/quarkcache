@@ -525,7 +525,7 @@ for regression detection, not a Redis comparison or production capacity claim.
 | Layer | Technology | Why |
 |---|---|---|
 | Cache engine | C++17 | Zero-overhead abstractions, RAII, direct OS syscalls |
-| Event loop | epoll / kqueue | O(1) I/O readiness, scales to 10k+ connections |
+| Event loop | epoll / kqueue | Readiness-based I/O without one thread per client |
 | Concurrency | `std::mutex` + `std::atomic` | Fine-grained locking, lock-free hot paths |
 | REST API | FastAPI + asyncio | Non-blocking Python, auto OpenAPI docs |
 | Dashboard | Next.js 16 + MUI v9 | App Router, TypeScript strict mode, Recharts |
